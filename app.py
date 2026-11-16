@@ -22,6 +22,7 @@ with st.form('search_form'):
         qualifications = st.text_input('Qualifications (comma-separated)', placeholder='BS Computer Science, MS')
         max_profiles = st.slider('Maximum results to collect', 10, 200, 100, 10)
         max_queries = st.slider('Search queries (more may hit rate limits)', 1, 12, 6)
+        strict_all = st.checkbox('Require every other entered keyword in search title/snippet', value=False, help='Stricter but may exclude good candidates whose search snippets are incomplete. Location evidence is always required when Location is provided.')
     run = st.form_submit_button('Find candidates', type='primary', use_container_width=True)
 
 f = Filters(designation, title, industry, location, experience, skills, qualifications)
@@ -34,7 +35,7 @@ if run:
         bar.progress(min(1.0, i / max(total, 1)), text=f'Search queries: {i}/{total} · unique links: {found}')
     with st.spinner('Searching…'):
         try:
-            rows, warnings = search(f, max_profiles, max_queries, progress)
+            rows, warnings = search(f, max_profiles, max_queries, progress, strict_all=strict_all)
             st.session_state['rows'] = rows
             st.session_state['warnings'] = warnings
         except Exception as e:
@@ -52,14 +53,14 @@ if rows:
     st.dataframe(df, use_container_width=True, hide_index=True,
                  column_config={'LinkedIn URL': st.column_config.LinkColumn('LinkedIn URL'),
                                 'Match score': st.column_config.NumberColumn('Match score (%)', min_value=0, max_value=100)})
-    st.caption(f'{len(df)} shown. Search engines may not return 100–500 links, even with a high requested limit. Qualification and years of experience are keyword searches, not verified structured filters.')
+    st.caption(f'{len(df)} shown. Requested locations require explicit geographic evidence in a search snippet/title. These clues are NOT verified candidate locations. Other keyword filters are search hints unless strict matching is selected. Some valid candidates will be missed.')
     xls = io.BytesIO()
     with pd.ExcelWriter(xls, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Candidates')
         sheet = writer.sheets['Candidates']
         sheet.freeze_panes = 'A2'
         sheet.auto_filter.ref = sheet.dimensions
-        for col, width in {'A':25,'B':55,'C':55,'D':85,'E':35,'F':18,'G':75,'H':20}.items():
+        for col, width in {'A':25,'B':55,'C':55,'D':85,'E':35,'F':18,'G':32,'H':75,'I':20}.items():
             sheet.column_dimensions[col].width = width
     c1,c2=st.columns(2)
     with c1: st.download_button('⬇ Download Excel', xls.getvalue(), 'candidate_links.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', use_container_width=True)

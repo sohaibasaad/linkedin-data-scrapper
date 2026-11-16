@@ -1,6 +1,6 @@
 # Free Python Candidate Discovery
 
-Streamlit dashboard that discovers **publicly indexed links** to LinkedIn member profiles using external web search, filters by search phrases, and exports CSV or Excel. **This is not a LinkedIn profile scraper:** it never fetches LinkedIn pages, does not authenticate, and does not bypass rate limits, CAPTCHAs or access controls.
+Streamlit dashboard that discovers **publicly indexed links** to LinkedIn member profiles using external web search, filters search results using conservative location clues, and exports CSV or Excel. **This is not a LinkedIn profile scraper:** it never fetches LinkedIn pages, does not authenticate, and does not bypass rate limits, CAPTCHAs or access controls.
 
 ## What it does
 
@@ -52,3 +52,11 @@ python -m unittest discover -s tests -v
 ## Next steps
 
 For reliable structured filtering against qualifications, years of experience, and skills, use a consent-based applicant database or a suitably licensed recruiting data source, and replace the `search` adapter in `search_engine.py`.
+
+## Location filter fix (v2)
+
+Previously the word `Austin` in `Austin Smith` could satisfy the location filter, because matching was a substring check and no location check was mandatory. Now **every search query** contains the requested location, and the result is only included when the search result title/snippet explicitly suggests a geographic location (e.g., `Location: Austin`, `Based in Austin`, `Austin, TX`, `Greater Austin Area`). A name match alone is rejected.
+
+This is intentionally conservative: **unknown locations are excluded** and search snippets are **not proof of current candidate location**. A match is a review lead, not a validated fact. Other input fields are search query hints; enable the checkbox to require every entered keyword to appear in the snippet/title (this may sharply reduce recall).
+
+After replacing the files on GitHub, Streamlit Community Cloud normally rebuilds the app. Confirm you can see the checkbox and `Location evidence` column; otherwise restart/redeploy the app in Streamlit's dashboard.

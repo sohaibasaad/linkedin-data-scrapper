@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from urllib.parse import urlparse, urlunparse, unquote
 
 FIELDS = ["Name (unverified)", "LinkedIn URL", "Search title", "Search snippet",
-          "Matched terms (snippet)", "Match score", "Source query", "Review status"]
+          "Matched terms (snippet)", "Match score", "Location evidence", "Source query", "Review status"]
 
 
 @dataclass
@@ -34,30 +34,23 @@ def quoted(term: str) -> str:
 
 
 def build_queries(f: Filters, max_queries: int = 8) -> list[str]:
-    """Balance specificity and recall; do not assert that result attributes are accurate."""
-    core = [f.designation.strip(), f.title.strip()]
-    core = list(dict.fromkeys(x for x in core if x))
+    """Search hints only: query matching never constitutes verified profile attributes."""
+    core = list(dict.fromkeys(x.strip() for x in (f.designation, f.title) if x.strip()))
     if not core and not any((f.skills, f.industry, f.qualifications)):
         return []
     base = 'site:linkedin.com/in/ ' + ' '.join(map(quoted, core[:2]))
-    facets = []
-    if f.location.strip(): facets.append(quoted(f.location.strip()))
-    if f.industry.strip(): facets.append(quoted(f.industry.strip()))
-    if f.experience.strip(): facets.append(quoted(f.experience.strip()))
-    skill_terms = terms(f.skills)
-    qualification_terms = terms(f.qualifications)
+    # Location is present in EVERY query when requested, not merely a few variants.
+    loc = ' ' + quoted(f.location.strip()) if f.location.strip() else ''
+    extras = [f.industry.strip(), f.experience.strip()] + terms(f.skills) + terms(f.qualifications)
+    extras = list(dict.fromkeys(x for x in extras if x))
     queries = []
-    def add(q):
-        if q not in queries: queries.append(q)
-    add(base + (' ' + ' '.join(facets[:2]) if facets else ''))
-    for skill in skill_terms:
-        add(base + ' ' + quoted(skill) + (' ' + facets[0] if facets else ''))
-    for degree in qualification_terms:
-        add(base + ' ' + quoted(degree) + (' ' + facets[0] if facets else ''))
-    if f.experience.strip():
-        add(base + ' ' + quoted(f.experience.strip()) + (' ' + facets[0] if facets else ''))
-    if f.industry.strip(): add(base + ' ' + quoted(f.industry.strip()))
-    if f.location.strip(): add(base + ' ' + quoted(f.location.strip()))
+    for extra in extras:
+        q = (base + loc + ' ' + quoted(extra)).strip()
+        if q not in queries:
+            queries.append(q)
+    fallback = (base + loc).strip()
+    if fallback not in queries:
+        queries.append(fallback)
     return queries[:max_queries]
 
 
@@ -84,6 +77,51 @@ def get_name(title: str) -> str:
     return part[:75]
 
 
+def location_evidence(location: str, title: str, snippet: str) -> str | None:
+    """Conservative search-snippet *clue*, NOT verified residence/employment location.
+
+    Reject bare city words (often candidate names), and demand an explicit location
+    marker or city+region notation. Return a clue to make decisions auditable.
+    """
+    requested = location.strip()
+    if not requested:
+        return None
+    # Search snippets are the primary evidence. The title may contain a name,
+    # but explicit 'Location: ...' text there is still admissible.
+    content = snippet + '  ' + title
+    loc_re = re.escape(requested)
+    sep = r"(?:\s*[,·|]\s*|\s+in\s+)"
+    markers = [
+        rf"\b(?:location|based in|located in|lives in|resides in|current city|city|area)\s*[:\-]?\s*{loc_re}(?=\b|\W|$)",
+        rf"\b(?:greater|metro(?:politan)?)\s+{loc_re}\s+(?:area|region)\b",
+        rf"\b{loc_re}\s+(?:metro(?:politan)?\s+area|area|region)\b",
+    ]
+    # 'Austin, TX' / 'Austin, Texas' / 'Karachi, Sindh' look like locations;
+    # avoid generic 'Austin, Python' which could be keyword spam.
+    cities = {
+        'austin': ('tx', 'texas', 'united states', 'usa'),
+        'karachi': ('sindh', 'pakistan'),
+        'lahore': ('punjab', 'pakistan'),
+        'islamabad': ('pakistan', 'islamabad capital territory'),
+        'new york': ('ny', 'new york', 'united states', 'usa'),
+        'san francisco': ('ca', 'california', 'united states', 'usa'),
+        'london': ('uk', 'united kingdom', 'england'),
+    }
+    city = requested.split(',')[0].strip().casefold()
+    qualifiers = [x.strip() for x in requested.split(',')[1:] if x.strip()]
+    if not qualifiers:
+        qualifiers = list(cities.get(city, ()))
+    if qualifiers:
+        city_pattern = re.escape(requested.split(',')[0].strip())
+        region_pattern = '|'.join(re.escape(q) for q in qualifiers)
+        markers.append(rf"\b{city_pattern}\s*,\s*(?:{region_pattern})\b")
+    for pat in markers:
+        match = re.search(pat, content, flags=re.IGNORECASE)
+        if match:
+            return match.group(0)
+    return None
+
+
 def match_terms(f: Filters, title: str, snippet: str) -> tuple[str, int]:
     text = (title + ' ' + snippet).casefold()
     candidates = [f.designation, f.title, f.industry, f.location, f.experience] + terms(f.skills) + terms(f.qualifications)
@@ -92,7 +130,7 @@ def match_terms(f: Filters, title: str, snippet: str) -> tuple[str, int]:
     return ', '.join(matched), round(100 * len(matched) / max(1, len(candidates)))
 
 
-def search(f: Filters, max_profiles: int = 100, max_queries: int = 8, on_progress=None) -> tuple[list[dict], list[str]]:
+def search(f: Filters, max_profiles: int = 100, max_queries: int = 8, on_progress=None, strict_all: bool = False) -> tuple[list[dict], list[str]]:
     """Fetch search-engine results only; cap queries and retain only public link metadata."""
     from ddgs import DDGS
     queries = build_queries(f, max_queries=max_queries)
@@ -111,11 +149,21 @@ def search(f: Filters, max_profiles: int = 100, max_queries: int = 8, on_progres
                     if not url or url in found: continue
                     title = str(result.get('title') or '')[:250]
                     snippet = str(result.get('body') or '')[:600]
+                    evidence = location_evidence(f.location, title, snippet)
+                    # If location is requested, exclude profiles with no explicit
+                    # geographic evidence in the *search result*. No guessing.
+                    if f.location.strip() and not evidence:
+                        continue
                     matches, score = match_terms(f, title, snippet)
+                    if strict_all:
+                        requested = [f.designation, f.title, f.industry, f.experience] + terms(f.skills) + terms(f.qualifications)
+                        combined = (title + ' ' + snippet).casefold()
+                        if any(x.strip().casefold() not in combined for x in requested if x.strip()):
+                            continue
                     found[url] = {FIELDS[0]: get_name(title), FIELDS[1]: url,
                                   FIELDS[2]: title, FIELDS[3]: snippet,
                                   FIELDS[4]: matches, FIELDS[5]: score,
-                                  FIELDS[6]: query, FIELDS[7]: 'Not verified'}
+                                  FIELDS[6]: evidence or 'Not requested', FIELDS[7]: query, FIELDS[8]: 'Not verified'}
                     if len(found) >= max_profiles: break
             except Exception as exc:
                 warnings.append(f"Query {index+1} unavailable ({type(exc).__name__}); external search may rate-limit requests.")
