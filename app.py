@@ -1,69 +1,126 @@
-import io
+"""Streamlit entrypoint. Results belong to a submitted filter snapshot, not an edited form."""
+from dataclasses import asdict
+import logging
+import time
+
 import pandas as pd
 import streamlit as st
-from search_engine import Filters, FIELDS, build_queries, search
 
-st.set_page_config(page_title='Candidate Discovery · Python', page_icon='🔎', layout='wide')
-st.title('🔎 Candidate Discovery')
-st.caption('Find publicly indexed LinkedIn profile links using an external search engine. No LinkedIn login or profile crawling.')
-st.info('Search snippets are incomplete and may be outdated. Scores measure keyword overlap in snippets, NOT candidate suitability. Review each candidate manually and respect privacy, search-provider rules and LinkedIn terms.')
+from exports import csv_bytes, excel_bytes
+from search_engine import FIELDS, Filters, ValidationError, search, validate
 
-with st.form('search_form'):
-    a,b,c = st.columns(3)
-    with a:
-        designation = st.text_input('Designation', placeholder='Software Engineer')
-        title = st.text_input('Job title', placeholder='Senior Backend Developer')
-        industry = st.text_input('Industry', placeholder='Information Technology')
-    with b:
-        location = st.text_input('Location', placeholder='Karachi, Pakistan')
-        experience = st.text_input('Experience keywords', placeholder='5 years')
-        skills = st.text_input('Skills (comma-separated)', placeholder='Python, Django, PostgreSQL')
-    with c:
-        qualifications = st.text_input('Qualifications (comma-separated)', placeholder='BS Computer Science, MS')
-        max_profiles = st.slider('Maximum results to collect', 10, 200, 100, 10)
-        max_queries = st.slider('Search queries (more may hit rate limits)', 1, 12, 6)
-        strict_all = st.checkbox('Require every other entered keyword in search title/snippet', value=False, help='Stricter but may exclude good candidates whose search snippets are incomplete. Location evidence is always required when Location is provided.')
+LOGGER = logging.getLogger(__name__)
+st.set_page_config(page_title='LinkedIn Candidate Finder', page_icon='🔎', layout='wide')
+st.title('LinkedIn Candidate Finder')
+st.caption('Live discovery of publicly indexed LinkedIn profile links. No preset cities, job titles, or sample records.')
+st.info('Every entered filter must have supporting text in the search result. Missing evidence is excluded. '
+        'Search snippets may be incomplete or outdated; these are not verified full LinkedIn profiles. '
+        'The result target is a maximum, not a promise of available matches.')
+
+with st.form('candidate_search'):
+    first, second = st.columns(2)
+    with first:
+        designation = st.text_input('Designation', placeholder='Software Engineer', max_chars=500,
+                                   help='Literal role phrase; no automatic synonyms or Boolean operators.')
+        location = st.text_input('Location', placeholder='Austin', max_chars=500,
+                                help='Any location. Use comma-separated city/state/country to require all parts. '
+                                     'Requires explicit location wording; names alone never qualify. '
+                                     'Spell locations as they appear in snippets; aliases are not guessed.')
+        industry = st.text_input('Industry', placeholder='Financial Services', max_chars=500,
+                                help='Required phrase in professional search-result text; not a verified LinkedIn industry field.')
+    with second:
+        experience = st.text_input('Experience (years; minimum or range)', placeholder='5+ or 3-7', max_chars=40,
+                                   help='5 or 5+ means at least five years. 3-7 means inclusive three to seven. '
+                                        'Requires an explicit years-of-experience statement; dates and tenure are not inferred.')
+        skills = st.text_input('Skills (comma-separated; all required)', placeholder='Python, Django', max_chars=500,
+                               help='Each skill is required as a whole term. Java does not match JavaScript.')
+        qualifications = st.text_input('Qualifications (comma-separated; all required)', placeholder='Bachelor of Science', max_chars=500,
+                                       help='Literal phrases, all required. No inferred degree equivalences.')
+    maximum = st.slider('Maximum profiles', min_value=10, max_value=500, value=100, step=10)
     run = st.form_submit_button('Find candidates', type='primary', use_container_width=True)
 
-f = Filters(designation, title, industry, location, experience, skills, qualifications)
-with st.expander('Show generated public web queries'):
-    for q in build_queries(f, max_queries): st.code(q)
-
 if run:
-    bar = st.progress(0, text='Searching public web index…')
-    def progress(i, total, found):
-        bar.progress(min(1.0, i / max(total, 1)), text=f'Search queries: {i}/{total} · unique links: {found}')
-    with st.spinner('Searching…'):
-        try:
-            rows, warnings = search(f, max_profiles, max_queries, progress, strict_all=strict_all)
-            st.session_state['rows'] = rows
-            st.session_state['warnings'] = warnings
-        except Exception as e:
-            st.session_state['rows'] = []
-            st.session_state['warnings'] = [f'Search engine unavailable: {type(e).__name__}: {str(e)[:180]}']
-    bar.empty()
+    filters = Filters(designation, location, industry, experience, skills, qualifications)
+    # Clear old exports immediately: failed/invalid searches must never show old records as new ones.
+    for key in ('report', 'submitted_filters', 'exports'):
+        st.session_state.pop(key, None)
+    try:
+        validate(filters, maximum)
+        now = time.monotonic()
+        if now - st.session_state.get('last_search_started', -100) < 5:
+            st.warning('Please wait a few seconds before starting another search.')
+        else:
+            st.session_state['last_search_started'] = now
+            bar = st.progress(0.0, text='Starting live search…')
+            def update(stats):
+                bar.progress(min(stats['matches'] / stats['requested'], 1.0),
+                             text=f"{stats['matches']} / {stats['requested']} matches · "
+                                  f"{stats['scanned']} results checked · {stats['requests']} requests")
+            try:
+                with st.spinner('Searching and checking every filter. Large searches can take several minutes.'):
+                    report = search(filters, maximum, update)
+                st.session_state['report'] = report
+                st.session_state['submitted_filters'] = asdict(filters)
+            finally:
+                bar.empty()
+    except ValidationError as exc:
+        st.error(str(exc))
+    except Exception:
+        LOGGER.exception('Candidate search failed unexpectedly')
+        st.error('An unexpected application error interrupted the search. No previous results are being shown. '
+                 'Check the Streamlit app logs and retry after resolving the error.')
 
-for warning in st.session_state.get('warnings', []): st.warning(warning)
-rows = st.session_state.get('rows', [])
-if rows:
-    df = pd.DataFrame(rows, columns=FIELDS)
-    st.subheader(f'{len(df)} distinct indexed profile links')
-    threshold = st.slider('Minimum snippet keyword overlap (%)', 0, 100, 0, 10)
-    df = df[df['Match score'] >= threshold].copy()
-    st.dataframe(df, use_container_width=True, hide_index=True,
-                 column_config={'LinkedIn URL': st.column_config.LinkColumn('LinkedIn URL'),
-                                'Match score': st.column_config.NumberColumn('Match score (%)', min_value=0, max_value=100)})
-    st.caption(f'{len(df)} shown. Requested locations require explicit geographic evidence in a search snippet/title. These clues are NOT verified candidate locations. Other keyword filters are search hints unless strict matching is selected. Some valid candidates will be missed.')
-    xls = io.BytesIO()
-    with pd.ExcelWriter(xls, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Candidates')
-        sheet = writer.sheets['Candidates']
-        sheet.freeze_panes = 'A2'
-        sheet.auto_filter.ref = sheet.dimensions
-        for col, width in {'A':25,'B':55,'C':55,'D':85,'E':35,'F':18,'G':32,'H':75,'I':20}.items():
-            sheet.column_dimensions[col].width = width
-    c1,c2=st.columns(2)
-    with c1: st.download_button('⬇ Download Excel', xls.getvalue(), 'candidate_links.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', use_container_width=True)
-    with c2: st.download_button('⬇ Download CSV', df.to_csv(index=False).encode('utf-8-sig'), 'candidate_links.csv', 'text/csv', use_container_width=True)
-elif run:
-    st.warning('No indexed profiles found. Try broader filters, fewer quoted phrases, or fewer search queries.')
+report = st.session_state.get('report')
+if report is not None:
+    filters_used = st.session_state.get('submitted_filters', {})
+    st.caption('Results below belong to the last submitted search. Editing the form does not refresh them until Find candidates is pressed.')
+    st.write('**Applied filters:** ' + '; '.join(f'{k.title()}: {v}' for k, v in filters_used.items() if v.strip()))
+    a, b, c = st.columns(3)
+    a.metric('Matching profiles', len(report.rows))
+    b.metric('Result target', report.requested)
+    c.metric('Search time', f'{report.elapsed:.1f}s')
+    messages = {
+        'target_reached': 'Requested maximum reached. All listed results passed the entered snippet-evidence checks.',
+        'exhausted': 'The provider exhausted available pages. Fewer supported matches may exist in its index.',
+        'budget_reached': 'Search stopped at the server time/request budget. The result set is partial.',
+        'rate_limited': 'The provider blocked or rate-limited this search. This does not mean no matching profiles exist.',
+        'provider_failed': 'The search provider is unavailable. This does not mean no matching profiles exist.',
+        'partial_provider_failure': 'Some searches failed. The result set may be incomplete.',
+    }
+    message = messages.get(report.stop_reason, 'Search finished.')
+    if report.stop_reason == 'target_reached':
+        st.success(message)
+    elif report.stop_reason in ('rate_limited', 'provider_failed') and not report.rows:
+        st.error(message)
+    else:
+        st.warning(message)
+    for warning in report.warnings:
+        st.warning(warning)
+    if report.rows:
+        frame = pd.DataFrame(report.rows, columns=FIELDS)
+        st.dataframe(frame, hide_index=True, use_container_width=True,
+                     column_config={'LinkedIn URL': st.column_config.LinkColumn('LinkedIn URL')})
+        try:
+            if 'exports' not in st.session_state:
+                st.session_state['exports'] = (excel_bytes(report.rows), csv_bytes(report.rows))
+            xlsx, csv = st.session_state['exports']
+            left, right = st.columns(2)
+            left.download_button('Download Excel', xlsx, 'linkedin_candidates.xlsx',
+                                 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', use_container_width=True)
+            right.download_button('Download CSV', csv, 'linkedin_candidates.csv', 'text/csv', use_container_width=True)
+        except Exception:
+            LOGGER.exception('Export failed')
+            st.error('Results are available above, but the export failed. Check the application logs.')
+    elif report.successful_pages:
+        st.info('No results passed every evidence check in the pages retrieved. Check diagnostics before changing filters.')
+    with st.expander('Search diagnostics'):
+        st.write(f'Requests: {report.requests} · Successful pages: {report.successful_pages} · '
+                 f'Failed requests: {report.failed_requests} · Results checked: {report.scanned} · '
+                 f'Duplicates skipped: {report.duplicates}')
+        st.caption('Rejected counts show the first failed check for each inspected result. '
+                   'No profile is added to meet a target unless all checks pass.')
+        if report.rejected:
+            st.dataframe(pd.DataFrame(report.rejected.items(), columns=['Missing/invalid evidence', 'Count']), hide_index=True)
+        st.write('Automatically generated queries:')
+        for query in report.queries:
+            st.code(query, language=None)
