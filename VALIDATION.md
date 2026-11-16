@@ -1,3 +1,13 @@
+# v2.2 validation — 16 November 2026
+
+54 tests and 7 subtests passed on Python 3.12 with pandas 2.3.3 and pycountry 24.6.1. This includes the existing collection/export/UI tests and new regression cases for Full-Stack, FullStack, role-leading snippets, Toronto/Ontario/Canada geography, wrong roles, unrelated Canada mentions, and query fallback.
+
+The provided screenshot proves that the deployed provider returned seven inspected results: four failed designation, two failed location, and one had a non-profile URL. It does not include the original result text, so this revision has NOT been verified against those exact seven records. Regression fixtures are synthetic; no claims of live candidate accuracy or 500 available matches are made.
+
+Kept Python 3.12 as the recommended deployment runtime. Updated deprecated layout parameters. The earlier network check below remains historical, not a new v2.2 live test.
+
+---
+
 # Validation — 16 November 2026
 
 ## Passed

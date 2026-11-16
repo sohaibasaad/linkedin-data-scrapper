@@ -9,6 +9,8 @@ import multiprocessing as mp
 import re
 import time
 import unicodedata
+
+import pycountry
 from collections import Counter, deque
 from dataclasses import dataclass, field
 from typing import Callable, Protocol
@@ -49,6 +51,7 @@ class SearchReport:
     rows: list[dict] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     rejected: dict[str, int] = field(default_factory=dict)
+    rejection_examples: list[dict] = field(default_factory=list)
     queries: list[str] = field(default_factory=list)
     requested: int = 100
     requests: int = 0
@@ -205,6 +208,10 @@ def build_queries(f: Filters) -> list[str]:
         candidates += [query(base_terms)] + [query(base_terms + [v]) for v in extra]
     else:
         candidates += [query([v]) for v in extra]
+    # Tokenized fallback retrieves punctuation variants without relaxing local checks.
+    role_words = re.split(r'[\s\-‐‑‒–—]+', clean(f.designation))
+    if len(role_words) > 1:
+        candidates.append(query(role_words + ([f.location] if f.location.strip() else []) + extra))
     return list(dict.fromkeys(q.strip() for q in candidates))
 
 
@@ -233,6 +240,23 @@ def historical(text: str) -> bool:
     return bool(re.search(r'\b(previously|formerly|former|past|used to|no longer|not based|not located|moved from|relocated from)\b', text, re.I))
 
 
+def geographic_chain(block: str) -> str:
+    """Recognize a compact city/region/country field using the ISO country dataset.
+    No custom city/country list and no guessing geography from a person's name.
+    """
+    parts = [x.strip() for x in block.strip(' .').split(',')]
+    if not 2 <= len(parts) <= 4:
+        return ''
+    if any(not re.fullmatch(r"[\w\s.'’()\-]+", p) or len(p.split()) > 6 for p in parts):
+        return ''
+    country = parts[-1].casefold()
+    for item in pycountry.countries:
+        names = [item.name, getattr(item, 'official_name', ''), getattr(item, 'common_name', '')]
+        if country in [n.casefold() for n in names if n]:
+            return ', '.join(parts)
+    return ''
+
+
 def location_evidence(location: str, title: str, snippet: str) -> str:
     """Only explicit geography; no hard-coded cities and no bare person-name matches.
     Missing/ambiguous geography is rejected instead of guessed. Historical clues rejected.
@@ -250,6 +274,8 @@ def location_evidence(location: str, title: str, snippet: str) -> str:
             # Stop before the next structured attribute; skills are not geographic evidence.
             value = re.split(r'\b(?:skills|experience|education|industry|connections|followers)\s*:', labeled[1], flags=re.I)[0]
             evidence.append(value.strip())
+        elif geographic_chain(block):
+            evidence.append(geographic_chain(block))
         elif re.fullmatch(r'(?:Greater\s+)?[\w\s,\-]+\s+(?:Area|Region)', block, re.I):
             evidence.append(block)
     # Contradictory explicit locations are ambiguous; do not select whichever happens to match.
@@ -288,17 +314,26 @@ def supported(term: str, text: str) -> str:
 
 def designation_evidence(value: str, title: str, snippet: str) -> str:
     """Match a role headline or explicit role label, not arbitrary mentions of jobs."""
+    def role_text(text):
+        text = re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', text)
+        return re.sub(r'(?<=[\w])[-‐‑‒–—]+(?=[\w])', ' ', text)
+    role = role_text(value)
     parts = re.split(r'\s+[|–—-]\s+', title)
     if len(parts) > 1:
         headline = parts[1]
-        match = supported(value, headline)
+        match = supported(role, role_text(headline))
         if match:
             return match
     for block in chunks(snippet):
         labeled = re.search(r'\b(?:designation|job title|current role|current position|role|works as)\s*[:\-]?\s+(.+)', block, re.I)
         if labeled and not historical(block):
-            match = supported(value, labeled[1])
+            match = supported(role, role_text(labeled[1]))
             if match:
+                return block
+        normalized = role_text(block)
+        # Accept a snippet headline/self-description; not arbitrary role mentions.
+        if re.match(r'(?:I am (?:a |an )?|(?:Senior|Junior|Lead|Staff|Principal)\s+)?' + phrase_pattern(role), normalized, re.I):
+            if supported(role, normalized):
                 return block
     return ''
 
@@ -358,7 +393,8 @@ def search(f: Filters, max_profiles: int = 100, on_progress: Callable | None = N
     rejected = Counter()
     found: dict[str, dict] = {}
     fingerprints: dict[str, set] = {}
-    queue = deque((q, 1, 0) for q in report.queries)
+    pending_queries = iter(report.queries)
+    queue = deque([(next(pending_queries), 1, 0)])
     try:
         provider = provider or DDGSProvider(limits.timeout)
     except Exception:
@@ -369,7 +405,12 @@ def search(f: Filters, max_profiles: int = 100, on_progress: Callable | None = N
     def warn(message):
         if message not in report.warnings:
             report.warnings.append(message)
-    while queue and len(found) < max_profiles:
+    while len(found) < max_profiles:
+        if not queue:
+            next_query = next(pending_queries, None)
+            if next_query is None:
+                break
+            queue.append((next_query, 1, 0))
         if report.requests >= limits.max_requests or clock() - started >= limits.max_seconds:
             report.stop_reason = 'budget_reached'; break
         query, page, stale = queue.popleft()
@@ -428,7 +469,10 @@ def search(f: Filters, max_profiles: int = 100, on_progress: Callable | None = N
                 report.duplicates += 1; continue
             evidence, failure = evaluate(f, title, snippet)
             if failure:
-                rejected[failure] += 1; continue
+                rejected[failure] += 1
+                if len(report.rejection_examples) < 10:
+                    report.rejection_examples.append({'Reason': failure, 'Title': title, 'Snippet': snippet, 'URL': url})
+                continue
             found[url] = {'Name (from search title)': get_name(title), 'LinkedIn URL': url,
                           **evidence, 'Search title': title, 'Search snippet': snippet, 'Source query': query}
             if len(found) >= max_profiles:

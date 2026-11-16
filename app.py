@@ -24,7 +24,7 @@ with st.form('candidate_search'):
                                    help='Literal role phrase; no automatic synonyms or Boolean operators.')
         location = st.text_input('Location', placeholder='Austin', max_chars=500,
                                 help='Any location. Use comma-separated city/state/country to require all parts. '
-                                     'Requires explicit location wording; names alone never qualify. '
+                                     'Requires location wording or a city/region/country field; names alone never qualify. '
                                      'Spell locations as they appear in snippets; aliases are not guessed.')
         industry = st.text_input('Industry', placeholder='Financial Services', max_chars=500,
                                 help='Required phrase in professional search-result text; not a verified LinkedIn industry field.')
@@ -37,7 +37,7 @@ with st.form('candidate_search'):
         qualifications = st.text_input('Qualifications (comma-separated; all required)', placeholder='Bachelor of Science', max_chars=500,
                                        help='Literal phrases, all required. No inferred degree equivalences.')
     maximum = st.slider('Maximum profiles', min_value=10, max_value=500, value=100, step=10)
-    run = st.form_submit_button('Find candidates', type='primary', use_container_width=True)
+    run = st.form_submit_button('Find candidates', type='primary', width="stretch")
 
 if run:
     filters = Filters(designation, location, industry, experience, skills, qualifications)
@@ -98,7 +98,7 @@ if report is not None:
         st.warning(warning)
     if report.rows:
         frame = pd.DataFrame(report.rows, columns=FIELDS)
-        st.dataframe(frame, hide_index=True, use_container_width=True,
+        st.dataframe(frame, hide_index=True, width="stretch",
                      column_config={'LinkedIn URL': st.column_config.LinkColumn('LinkedIn URL')})
         try:
             if 'exports' not in st.session_state:
@@ -106,8 +106,8 @@ if report is not None:
             xlsx, csv = st.session_state['exports']
             left, right = st.columns(2)
             left.download_button('Download Excel', xlsx, 'linkedin_candidates.xlsx',
-                                 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', use_container_width=True)
-            right.download_button('Download CSV', csv, 'linkedin_candidates.csv', 'text/csv', use_container_width=True)
+                                 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', width="stretch")
+            right.download_button('Download CSV', csv, 'linkedin_candidates.csv', 'text/csv', width="stretch")
         except Exception:
             LOGGER.exception('Export failed')
             st.error('Results are available above, but the export failed. Check the application logs.')
@@ -121,6 +121,9 @@ if report is not None:
                    'No profile is added to meet a target unless all checks pass.')
         if report.rejected:
             st.dataframe(pd.DataFrame(report.rejected.items(), columns=['Missing/invalid evidence', 'Count']), hide_index=True)
+        if report.rejection_examples:
+            st.write('Excluded result examples (not accepted candidates):')
+            st.dataframe(report.rejection_examples, hide_index=True, width='stretch')
         st.write('Automatically generated queries:')
         for query in report.queries:
             st.code(query, language=None)

@@ -1,4 +1,10 @@
-# LinkedIn Candidate Finder — revised deployment package
+## Update from v2
+
+Replace all files together, particularly `search_engine.py`, `app.py`, and `requirements.txt`. The new `pycountry==24.6.1` dependency must be installed. Commit the requirements change so Streamlit reinstalls dependencies. Keep Python 3.12 and the `app.py` entrypoint.
+
+This revision fixes designation punctuation and recognizes country-ended location fields. It adds automatic tokenized query fallback and up to ten excluded-result examples in diagnostics. It does not assume the six rejected profile links from your screenshot were all valid: their original title/snippet text was not provided.
+
+# LinkedIn Candidate Finder — v2.2 matching fix
 
 A Streamlit application that discovers live, publicly indexed LinkedIn profile links and keeps only results with evidence for every submitted filter. There are no preset cities, job titles, candidate lists, fabricated records, or runtime demo fallbacks.
 
@@ -27,13 +33,13 @@ The free DDGS search provider can time out or block shared hosting addresses. Co
 
 1. Extract this ZIP.
 2. Replace the existing application files in the GitHub repository with the **contents** of `linkedin_candidate_finder/`. Keep `app.py`, `search_engine.py`, `exports.py`, and `requirements.txt` together at the repository root. Commit all files, including the revised requirements.
-3. Set the Streamlit entrypoint to `app.py` and use Python **3.12**. If you intentionally keep the folder, set the entrypoint to `linkedin_candidate_finder/app.py` and keep its requirements next to it.
+3. Set the Streamlit entrypoint to `app.py` and use Python **3.12 or 3.14**. If you intentionally keep the folder, set the entrypoint to `linkedin_candidate_finder/app.py` and keep its requirements next to it.
 4. Reboot/redeploy the app after the dependency installation finishes. No secrets or API keys are needed for DDGS.
 5. Start with Designation = `Software Engineer`, Location = `Austin`, Maximum profiles = `10`, and leave other filters empty. Then test one additional filter at a time.
 6. Check Search diagnostics. If the provider fails, changing filters does not fix connectivity. Check Streamlit logs and retry later; do not interpret a failed search as a candidate count.
 7. Test 500 only after the provider successfully returns records for a broad search.
 
-Pinned packages match the locally tested environment. Re-test before upgrading them. Installing the development dependencies is not necessary on Streamlit.
+Pandas 2.3.3 includes Python 3.14 support. The v2.1 revision replaces the incompatible pandas 2.2.3 pin. The revised tests passed on Python 3.12. Keep your working Python 3.12 deployment. A full Python 3.14 deployment was not validated. Re-test before upgrading them. Installing the development dependencies is not necessary on Streamlit.
 
 ## Run locally
 
@@ -49,8 +55,8 @@ streamlit run app.py
 
 | Field | Acceptance rule |
 | --- | --- |
-| Designation | Literal whole phrase in the role headline or an explicit current-role/designation label. Not inferred from a candidate name or an arbitrary mention of hiring that role. |
-| Location | All comma-separated parts must occur in explicit geographical evidence such as `Location: Austin, TX`, `Based in Austin`, or `Greater Austin Area`. Bare person names and historical clues are excluded. Conflicting explicit location clues are rejected. No hard-coded city dictionary. |
+| Designation | Role phrase in a headline, explicit role label, or leading snippet self-description. Hyphen/space and camel-case variants are normalized for designation only. Not inferred from a candidate name or an arbitrary mention of hiring that role. |
+| Location | All comma-separated parts must occur in geographical evidence such as `Location: Austin, TX`, `Based in Austin`, or `Greater Austin Area`. Compact location fields ending in an ISO country name, such as `Toronto, Ontario, Canada`, are also accepted using pycountry. Bare person names and historical clues are excluded. Conflicting explicit location clues are rejected. No manually hard-coded city dictionary; country recognition uses the standard ISO dataset. |
 | Industry | Literal whole phrase in non-negated professional search-result text. This is keyword evidence, not access to LinkedIn's structured industry field. |
 | Experience | `5` / `5+` means minimum five years; `3-7` means inclusive range. Requires a numeric `years of experience` statement. Years at one employer, dates, and total careers are not inferred or added. Unbounded `7+` evidence cannot satisfy a finite maximum of seven. |
 | Skills | Comma/semicolon-separated terms, all required as whole terms. Java does not match JavaScript; SQL does not match MySQL; C does not match C++/C#. |
@@ -58,12 +64,12 @@ streamlit run app.py
 
 Use plain phrases; Boolean expressions and semantic equivalences are not interpreted. Exact wording favors precision over recall. Up to 20 skills and 20 qualifications are accepted; excess input is rejected instead of silently truncated. The required terms are never relaxed during result acceptance, even when the automatic query planner uses broader retrieval queries.
 
-Location-only and other single-field searches are supported. A city, state, or country can be any user-entered name; aliases (`TX` versus `Texas`, `USA` versus `United States`) are not guessed. A snippet containing only `Austin, TX` without an explicit location marker may be excluded. This is deliberate: arbitrary comma-separated words can be names or skills, not verified geography. Even these conservative checks cannot prove that every accepted snippet describes the person's current state.
+Location-only and other single-field searches are supported. A city, state, or country can be any user-entered name; compact comma-separated fields ending in a country name are recognized with the offline pycountry dataset; aliases (`TX` versus `Texas`, `USA` versus `United States`) are not guessed. A snippet containing only `Austin, TX` without an explicit location marker may be excluded. This is deliberate: arbitrary comma-separated words can be names or skills, not verified geography. Even these conservative checks cannot prove that every accepted snippet describes the person's current state.
 
 ## Collection, performance, and exceptions
 
 - Transport batches request up to 100 raw results **per page**, not a total cap of 100. Collection supports up to 500 accepted, unique links.
-- Query/page traversal is round-robin. Short pages do not prematurely end pagination; empty pages and repeated pages terminate a query.
+- Each query is paginated before the next automatic fallback query is tried. Short pages do not prematurely end pagination; empty pages and repeated pages terminate a query.
 - New evidence for a previously rejected URL is re-evaluated. Accepted URLs are deduplicated across queries, pages, tracking parameters, and LinkedIn country subdomains.
 - Default server budgets: 120 provider calls, 240 seconds, 0.5-second spacing, 15-second internal network timeout, one retry for a timeout, and a three-consecutive-error circuit breaker. These are operational bounds, not candidate presets.
 - Each DDGS call runs in a disposable subprocess with a hard wall-clock wait of `timeout + 5` seconds plus brief process cleanup. This prevents a backend thread from indefinitely hanging the UI. A search time budget can overrun by the final in-flight request and cleanup.
